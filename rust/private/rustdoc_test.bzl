@@ -133,6 +133,8 @@ def _compiled_rust_doc_test_impl(ctx, toolchain, crate_info):
     rustdoc_flags.add("--test")
     rustdoc_flags.add("--no-run")
     rustdoc_flags.add("-Zunstable-options")
+    rustdoc_flags.add(toolchain.rustc, format = "--test-builder=%s")
+    rustdoc_flags.add("--merge-doctests=no")
     rustdoc_flags.add("--persist-doctests")
     rustdoc_flags.add_all([doctest_dir], expand_directories = False)
     rustdoc_flags.add_all(ctx.attr.rustdoc_flags)
