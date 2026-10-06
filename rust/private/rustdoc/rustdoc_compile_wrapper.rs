@@ -75,7 +75,22 @@ fn parse_test_names(stdout: &str) -> Vec<String> {
         .lines()
         .filter_map(|line| {
             let rest = line.strip_prefix("test ")?;
-            let name = rest.rsplit_once(" ... ")?.0;
+            let (name, status) = rest.rsplit_once(" ... ")?;
+            // Ignored doctests are never compiled by rustdoc and have no
+            // persisted binary.
+            if status == "ignored" || status.starts_with("ignored,") {
+                return None;
+            }
+            // `compile_fail` doctests have no persisted binary; libtest prints
+            // `<name> - compile fail ... ok` for them under `--no-run`.
+            if name.ends_with(" - compile fail") {
+                return None;
+            }
+            // Under `--no-run`, libtest appends ` - compile` to every test
+            // name in stdout (`<file> - <item> (line <n>) - compile`). Strip
+            // it so `mangle_test_name` sees `(line <n>)` at the end and the
+            // metadata records the clean human-readable name.
+            let name = name.strip_suffix(" - compile").unwrap_or(name);
             Some(name.to_string())
         })
         .collect()
@@ -96,7 +111,15 @@ fn parse_test_names(stdout: &str) -> Vec<String> {
 fn mangle_test_name(human_name: &str, counts: &mut HashMap<(String, String), usize>) -> String {
     if let Some((file_and_item, line_part)) = human_name.rsplit_once(" (line ") {
         if let Some(line_num) = line_part.strip_suffix(')') {
-            if let Some((file_path, _)) = file_and_item.split_once(" - ") {
+            // Item doctests format as `<file> - <item> (line <n>)`, while
+            // crate-level (`//!`) doctests have an empty item and format as
+            // `<file> - (line <n>)`, leaving `<file> -` after stripping
+            // ` (line <n>)`.
+            let file_path = file_and_item
+                .split_once(" - ")
+                .map(|(f, _)| f)
+                .or_else(|| file_and_item.strip_suffix(" -"));
+            if let Some(file_path) = file_path {
                 let mangled: String = file_path
                     .chars()
                     .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
@@ -234,4 +257,34 @@ fn main() {
     }
 
     exit(code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_test_names_no_run_output() {
+        let stdout = "\
+running 4 tests
+test src/lib.rs - (line 1) - compile ... ok
+test src/lib.rs - add (line 5) - compile ... ok
+test src/lib.rs - add (line 9) - compile fail ... ok
+test src/lib.rs - add (line 13) ... ignored
+
+test result: ok. 3 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.42s
+";
+        let names = parse_test_names(stdout);
+        assert_eq!(
+            names,
+            vec!["src/lib.rs - (line 1)", "src/lib.rs - add (line 5)",]
+        );
+
+        let mut counts = HashMap::new();
+        let mangled: Vec<String> = names
+            .iter()
+            .map(|n| mangle_test_name(n, &mut counts))
+            .collect();
+        assert_eq!(mangled, vec!["src_lib_rs_1_0", "src_lib_rs_5_0"]);
+    }
 }

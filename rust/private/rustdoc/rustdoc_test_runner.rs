@@ -107,6 +107,25 @@ fn main() {
     let extra_args: Vec<String> = env::args().skip(1).collect();
     let bins = find_test_binaries(&doctest_dir);
 
+    let found_dirs: std::collections::HashSet<&str> = bins
+        .iter()
+        .filter_map(|b| b.parent()?.file_name()?.to_str())
+        .collect();
+    let missing: Vec<&String> = name_map
+        .keys()
+        .filter(|dir| !found_dirs.contains(dir.as_str()))
+        .collect();
+    if !missing.is_empty() {
+        eprintln!(
+            "error: {} doc test(s) were compiled according to metadata, \
+             but their persisted binaries were not found under {} (missing: {:?})",
+            missing.len(),
+            doctest_dir.display(),
+            missing
+        );
+        std::process::exit(1);
+    }
+
     let start = Instant::now();
     let mut results: Vec<TestResult> = Vec::new();
 

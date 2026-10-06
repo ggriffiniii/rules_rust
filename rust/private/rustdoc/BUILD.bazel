@@ -30,3 +30,9 @@ rust_binary(
     srcs = ["rustdoc_compile_wrapper.rs"],
     edition = "2018",
 )
+
+rust_test(
+    name = "rustdoc_compile_wrapper_test",
+    crate = ":rustdoc_compile_wrapper",
+    edition = "2018",
+)
