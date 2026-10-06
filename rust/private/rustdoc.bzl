@@ -14,6 +14,7 @@
 
 """Rules for generating documentation with `rustdoc` for Bazel built crates"""
 
+load("@rules_cc//cc/common:cc_common.bzl", "cc_common")
 load("//rust/private:common.bzl", "rust_common")
 load("//rust/private:pic_utils.bzl", "should_use_pic")
 load("//rust/private:providers.bzl", "LintsInfo")
@@ -27,6 +28,10 @@ load(
     "get_lib_name_for_windows",
     "get_preferred_artifact",
 )
+
+def _are_linkstamps_supported(feature_configuration):
+    return (cc_common.is_enabled(feature_configuration = feature_configuration, feature_name = "linkstamps") and
+            hasattr(cc_common, "register_linkstamp_compile_action"))
 
 def _rustdoc_crate_info(crate_info, output):
     """Clone a `CrateInfo` provider for use by a rustdoc action.
@@ -116,7 +121,7 @@ def rustdoc_compile_action(
 
     cc_toolchain, feature_configuration = find_cc_toolchain(ctx)
 
-    dep_info, build_info, _ = collect_deps(
+    dep_info, build_info, linkstamps = collect_deps(
         deps = crate_info.deps.to_list(),
         proc_macro_deps = crate_info.proc_macro_deps.to_list(),
         aliases = crate_info.aliases,
@@ -138,6 +143,30 @@ def rustdoc_compile_action(
         include_linker_inputs = is_test or force_depend_on_objects,
         include_link_flags = False,
     )
+
+    # rustdoc links each doc test into a binary. `collect_inputs` only
+    # registers linkstamps for binary crate types, so compile them here, named
+    # after this target so they cannot collide with the crate's own.
+    if (is_test or force_depend_on_objects) and cc_toolchain and _are_linkstamps_supported(feature_configuration):
+        linkstamp_outs = list(linkstamp_outs)
+        for linkstamp in linkstamps.to_list():
+            linkstamp_out = ctx.actions.declare_file("_objs/{}/{}o".format(
+                ctx.label.name,
+                linkstamp.file().path[:-len(linkstamp.file().extension)],
+            ))
+            linkstamp_outs.append(linkstamp_out)
+            cc_common.register_linkstamp_compile_action(
+                actions = ctx.actions,
+                cc_toolchain = cc_toolchain,
+                feature_configuration = feature_configuration,
+                source_file = linkstamp.file(),
+                output_file = linkstamp_out,
+                compilation_inputs = linkstamp.hdrs(),
+                inputs_for_validation = compile_inputs,
+                label_replacement = str(ctx.label),
+                output_replacement = linkstamp_out.path,
+            )
+        compile_inputs = depset(linkstamp_outs, transitive = [compile_inputs])
 
     # rustdoc actions don't produce the crate's compile output, so we swap in
     # a rustdoc-owned `File` for the `CrateInfo` handed to `construct_arguments`.
@@ -166,6 +195,12 @@ def rustdoc_compile_action(
         for dep in dep_info.transitive_noncrates.to_list():
             for lib in dep.libraries:
                 if not (lib.static_library or lib.pic_static_library):
+                    continue
+
+                # `construct_arguments` already passes alwayslink libraries by
+                # path between --whole-archive flags. Their artifacts (`.lo`)
+                # cannot be found by `-l`.
+                if lib.alwayslink:
                     continue
                 arg = get_lib_name(get_preferred_artifact(lib, use_pic))
                 if not for_windows:
@@ -207,7 +242,8 @@ def rustdoc_compile_action(
         attr = ctx.attr,
         file = ctx.file,
         toolchain = toolchain,
-        tool_path = toolchain.rust_doc.short_path if is_test else toolchain.rust_doc.path,
+        tool_file = None if is_test else toolchain.rust_doc,
+        tool_path = toolchain.rust_doc.short_path if is_test else None,
         cc_toolchain = cc_toolchain,
         feature_configuration = feature_configuration,
         crate_info = rustdoc_crate_info,
